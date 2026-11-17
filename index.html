@@ -157,8 +157,10 @@ details summary{cursor:pointer;font-weight:600;color:var(--navy);min-height:36px
 
 <!-- STOCK -->
 <section id="t-stock" aria-label="Stock">
-  <div class="row" style="justify-content:space-between"><h2>Stock y precios</h2><button class="btn small" data-act="art-new">+ Artículo</button></div>
+  <div class="row" style="justify-content:space-between"><h2>Stock y precios</h2><div class="row"><button class="btn sec small" data-act="imp">Importar lista</button><button class="btn small" data-act="art-new">+ Artículo</button></div></div>
+  <input type="file" id="impFile" accept=".csv,text/csv,text/plain" style="display:none" aria-label="Archivo de artículos">
   <input id="sBus" style="width:100%;margin-bottom:10px" placeholder="Buscar artículo" aria-label="Buscar artículo en stock">
+  <div class="chips" id="sMarca"></div>
   <div id="sList"></div>
 </section>
 
@@ -253,7 +255,7 @@ const DEF_NEG={nombre:'PU-MAPU Distribuciones',direccion:'Av. América 466',tele
 let db=null;const downloads=true;
 const S={articulos:{},remitos:[],ingresos:[],pagos:[],clientes:{},config:null,configLoaded:false,stock:{}};
 const V={tipo:'publico',cond:'efectivo',lineas:[]};
-const UI={tab:'vender',rPer:'hoy',qPer:'hoy'};
+const UI={tab:'vender',rPer:'hoy',qPer:'hoy',sMarca:''};
 let unlocked=false;
 
 function toast(m,ms=2600){const t=$('#toast');t.textContent=m;t.style.display='block';clearTimeout(t._h);t._h=setTimeout(()=>t.style.display='none',ms)}
@@ -482,7 +484,10 @@ async function dlPdf(){const r=curR;try{await loadJsPDF()}catch(e){toast('No se 
   saveFile('remito-'+pad(r.numero)+'.pdf',pdf.output('blob'))}
 
 /* ---------- STOCK ---------- */
-function renderStock(){const q=$('#sBus').value.trim().toLowerCase();const L=artList().filter(a=>!q||(a.nombre+' '+(a.marca||'')).toLowerCase().includes(q));const box=$('#sList');
+function renderStock(){const marcas=[...new Set(artList().map(a=>a.marca||'').filter(Boolean))].sort((a,b)=>a.localeCompare(b,'es'));
+  if(UI.sMarca&&!marcas.includes(UI.sMarca))UI.sMarca='';
+  $('#sMarca').innerHTML=marcas.length>1?['<button type="button" data-v="" aria-pressed="'+(!UI.sMarca)+'">Todas</button>'].concat(marcas.map(m=>'<button type="button" data-v="'+esc(m)+'" aria-pressed="'+(UI.sMarca===m)+'">'+esc(m)+'</button>')).join(''):'';
+  const q=$('#sBus').value.trim().toLowerCase();const L=artList().filter(a=>(!UI.sMarca||a.marca===UI.sMarca)&&(!q||(a.nombre+' '+(a.marca||'')).toLowerCase().includes(q)));const box=$('#sList');
   if(!L.length){box.innerHTML='<div class="empty">'+(q?'No se encontró ningún artículo.':'Todavía no hay artículos. Tocá "+ Artículo" para cargar el primero.')+'</div>';return}
   box.innerHTML=L.map(a=>{const st=stockOf(a.id);const low=st<=(+a.stockMinimo||0);
     return '<div class="card" style="margin-bottom:8px"><div class="row" style="justify-content:space-between;align-items:flex-start"><div class="grow" style="min-width:0"><b>'+esc(a.nombre)+'</b><div class="muted">'+esc(a.marca||'')+'</div></div><div style="text-align:right"><div class="muted">Stock</div><div class="'+(low?'stk-low':'stk-ok')+'" style="font-size:22px">'+st+'</div></div></div>'+
@@ -509,6 +514,54 @@ function movView(id){const a=S.articulos[id];const ev=[];
   ev.sort((x,y)=>y.ts-x.ts);
   openModal('<div class="row" style="justify-content:space-between"><h3 style="margin:0">'+esc(a.nombre)+'</h3><button class="btn sec small" data-act="close">Cerrar</button></div><p class="muted">Stock actual: <b>'+stockOf(id)+'</b></p>'+
   (ev.length?'<table><thead><tr><th>Fecha</th><th>Detalle</th><th class="n">Cant.</th></tr></thead><tbody>'+ev.slice(0,200).map(e=>'<tr><td>'+fdate(e.ts)+'</td><td>'+esc(e.d)+'</td><td class="n" style="color:'+(e.c<0?'var(--red)':'var(--green)')+'">'+(e.c>0?'+':'')+e.c+'</td></tr>').join('')+'</tbody></table>':'<div class="empty">Sin movimientos.</div>'))}
+
+/* ---------- IMPORTAR LISTA ---------- */
+let IMP=null;
+const norm=s=>String(s||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/\s+/g,' ').trim();
+function pNum(v){let s=String(v||'').trim().replace(/\$/g,'').replace(/\s/g,'');if(!s)return 0;
+  if(s.includes(','))return num(s);if(/^\d{1,3}(\.\d{3})+$/.test(s))s=s.replace(/\./g,'');const x=parseFloat(s);return isFinite(x)?x:NaN}
+function parseCSV(t){t=t.replace(/^﻿/,'');const h=t.split('\n')[0];const sep=(h.match(/;/g)||[]).length>=(h.match(/,/g)||[]).length?';':',';
+  const rows=[];let row=[],f='',q=false;
+  for(let i=0;i<t.length;i++){const c=t[i];
+    if(q){if(c==='"'){if(t[i+1]==='"'){f+='"';i++}else q=false}else f+=c}
+    else if(c==='"')q=true;else if(c===sep){row.push(f);f=''}else if(c==='\n'){row.push(f);rows.push(row);row=[];f=''}else if(c!=='\r')f+=c}
+  if(f||row.length){row.push(f);rows.push(row)}
+  return rows.filter(r=>r.some(x=>String(x).trim()))}
+function impPlan(rows){if(!rows.length)return{error:'El archivo está vacío.'};
+  const h=rows[0].map(x=>norm(x).replace(/ /g,'_'));const ix=k=>h.indexOf(k);
+  const iC=ix('codigo'),iM=ix('marca'),iN=ix('nombre'),iP=ix('precio_publico'),iW=ix('precio_mayorista'),iS=ix('stock');
+  if(iN<0||iP<0||iW<0)return{error:'El archivo tiene que tener las columnas nombre, precio_publico y precio_mayorista.'};
+  const all=Object.values(S.articulos);const plan={nuevos:[],cambios:[],iguales:0,errores:[]};
+  rows.slice(1).forEach((r,n)=>{const g=i=>i>=0?String(r[i]==null?'':r[i]).trim():'';const nombre=g(iN);if(!nombre)return;
+    const d={codigo:g(iC),marca:g(iM),nombre,precioPublico:pNum(g(iP)),precioMayorista:pNum(g(iW))};const st=pNum(g(iS))||0;
+    if(!isFinite(d.precioPublico)||!isFinite(d.precioMayorista)||d.precioPublico<0||d.precioMayorista<0){plan.errores.push('Fila '+(n+2)+' ('+nombre+'): precio inválido');return}
+    let a=d.codigo?all.find(x=>String(x.codigo||'')===d.codigo):null;
+    if(!a)a=all.find(x=>norm(x.nombre)===norm(nombre)&&norm(x.marca)===norm(d.marca));
+    if(!a)plan.nuevos.push({d,st});
+    else if(+a.precioPublico!==d.precioPublico||+a.precioMayorista!==d.precioMayorista||a.nombre!==d.nombre||(a.marca||'')!==d.marca||String(a.codigo||'')!==d.codigo||a.activo===false)plan.cambios.push({a,d});
+    else plan.iguales++});
+  return plan}
+async function impFile(inp){const f=inp.files&&inp.files[0];inp.value='';if(!f)return;
+  if(/\.xlsx?$/i.test(f.name)){toast('Guardá la lista como CSV (separado por punto y coma) e importá ese archivo',5000);return}
+  let txt='';try{txt=await f.text()}catch(e){toast('No se pudo leer el archivo');return}
+  const p=impPlan(parseCSV(txt));if(p.error){toast(p.error,5000);return}IMP=p;
+  const ch=p.cambios.slice(0,60).map(x=>'<tr><td>'+esc(x.d.nombre)+'</td><td class="n">'+money(x.a.precioPublico)+' → <b>'+money(x.d.precioPublico)+'</b></td><td class="n">'+money(x.a.precioMayorista)+' → <b>'+money(x.d.precioMayorista)+'</b></td></tr>').join('');
+  const nu=p.nuevos.slice(0,60).map(x=>'<tr><td>'+esc(x.d.nombre)+'<div class="muted">'+esc(x.d.marca)+'</div></td><td class="n">'+money(x.d.precioPublico)+'</td><td class="n">'+money(x.d.precioMayorista)+'</td></tr>').join('');
+  openModal('<h3>Importar lista</h3><p><b>'+p.nuevos.length+'</b> artículos nuevos · <b>'+p.cambios.length+'</b> con cambios · '+p.iguales+' sin cambios</p>'+
+    (p.errores.length?'<div class="note">'+p.errores.map(esc).join('<br>')+'</div>':'')+
+    (nu?'<h3 style="margin-top:12px">Nuevos</h3><table><thead><tr><th>Artículo</th><th class="n">Público</th><th class="n">Mayorista</th></tr></thead><tbody>'+nu+'</tbody></table>':'')+
+    (ch?'<h3 style="margin-top:12px">Precios que cambian</h3><table><thead><tr><th>Artículo</th><th class="n">Público</th><th class="n">Mayorista</th></tr></thead><tbody>'+ch+'</tbody></table>':'')+
+    '<p class="muted">El stock del archivo solo se usa para artículos nuevos. Para los que ya existen, usá "Ingreso / ajuste".</p>'+
+    '<div class="row" style="margin-top:10px">'+((p.nuevos.length+p.cambios.length)?'<button class="btn ok" id="impOk" data-act="imp-ok">Importar</button>':'')+'<button class="btn sec" data-act="close">Cancelar</button></div>')}
+async function impRun(){const p=IMP;if(!p)return;const b=$('#impOk');b.disabled=true;let ok=0;const tot=p.nuevos.length+p.cambios.length;
+  try{for(const x of p.nuevos){const ref=db.collection('articulos').doc();
+      await ref.set(Object.assign({},x.d,{stockMinimo:0,activo:true,modificadoPor:who(),modificadoTs:Date.now()}));
+      if(x.st)await db.collection('ingresos').doc().set({aid:ref.id,cant:x.st,motivo:'Stock inicial (importación)',ts:Date.now(),usuario:who()});
+      ok++;b.textContent='Importando… '+ok+' de '+tot}
+    for(const x of p.cambios){await db.doc('articulos/'+x.a.id).update(Object.assign({},x.d,{activo:true,modificadoPor:who(),modificadoTs:Date.now()}));ok++;b.textContent='Importando… '+ok+' de '+tot}
+    closeModal();toast('Lista importada: '+p.nuevos.length+' nuevos y '+p.cambios.length+' actualizados',4500)}
+  catch(e){closeModal();toast(errMsg(e)+' Se importaron '+ok+' de '+tot+'. Volvé a importar el archivo para completar.',6000)}
+  IMP=null}
 
 /* ---------- RESUMEN ---------- */
 function saldos(){const m={};
@@ -564,6 +617,7 @@ document.addEventListener('click',e=>{
     if(p==='vCond')V.cond=sb.dataset.v;
     if(p==='rPer'){UI.rPer=sb.dataset.v;renderRemitos()}
     if(p==='qPer'){UI.qPer=sb.dataset.v;renderResumen()}
+    if(p==='sMarca'){UI.sMarca=sb.dataset.v;renderStock()}
     return}
   const b=e.target.closest('[data-act]');if(!b)return;const act=b.dataset.act,id=b.dataset.id,i=+b.dataset.i;
   if(act==='add-art'){const a=S.articulos[id];const ex=V.lineas.find(l=>l.aid===id);if(ex)ex.cant++;else V.lineas.push({aid:id,nombre:a.nombre,marca:a.marca||'',cant:1,precio:precioDe(a,V.tipo)});$('#vBuscar').value='';renderRes();renderLineas()}
@@ -580,6 +634,8 @@ document.addEventListener('click',e=>{
   else if(act==='r-anu'){$('#rActs').innerHTML='<div class="note" style="width:100%">¿Anular el remito N° '+pad(curR.numero)+'? Los artículos vuelven al stock.</div><button class="btn warn" data-act="r-anu-ok">Sí, anular</button><button class="btn sec" data-act="close">No</button>'}
   else if(act==='r-anu-ok')setEstado('anulado');
   else if(act==='art-new')artForm(null);
+  else if(act==='imp'){$('#impFile').click()}
+  else if(act==='imp-ok')impRun();
   else if(act==='art-edit')artForm(S.articulos[id]);
   else if(act==='art-save')artSave(id);
   else if(act==='art-off'){db.doc('articulos/'+id).update({activo:false,modificadoPor:who(),modificadoTs:Date.now()}).then(()=>{closeModal();toast('Artículo dado de baja')}).catch(er=>toast(errMsg(er),4000))}
@@ -600,7 +656,7 @@ document.addEventListener('input',e=>{const t=e.target;
     const s=document.querySelector('[data-sub="'+t.dataset.i+'"]');if(s)s.textContent=money(l.cant*l.precio);calcTotal()}
   else if(t.id==='rBus')renderRemitos();
   else if(t.id==='sBus')renderStock()});
-document.addEventListener('change',e=>{const t=e.target;if(t.id==='vCliente')onCliente();else if(t.id==='rEst')renderRemitos();else if(t.dataset&&t.dataset.in==='cant')renderLineas()});
+document.addEventListener('change',e=>{const t=e.target;if(t.id==='impFile'){impFile(t);return}if(t.id==='vCliente')onCliente();else if(t.id==='rEst')renderRemitos();else if(t.dataset&&t.dataset.in==='cant')renderLineas()});
 $('#modal').addEventListener('click',e=>{if(e.target.id==='modal')closeModal()});
 
 renderLineas();renderRes();
